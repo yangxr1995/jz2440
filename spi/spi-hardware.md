@@ -259,3 +259,200 @@ void OLEDPrint(int page, int col, char *str)
     }
 }
 ```
+
+# GPIO模拟SPI，实现Flash控制
+通过前面的实验，我们明白了，SPI协议本身的关键是：
+* 片选
+通常是拉低选片
+* 数据线和时钟线的同步操作
+需要看时序图
+* 串行bit传输
+
+## 读取Flash的MID PID
+芯片读MID PID的时序图
+![](./pic/15.jpg)
+
+* 写操作和OLED类似
+* 读操作关键在理解是主设备控制CLK（同步信号）
+```c
+static char SPI_Get_DI(void)
+{
+    if (GPGDAT & (1<<5))
+        return 1;
+    else 
+        return 0;
+}
+
+void SPISendByte(unsigned char val)
+{
+    int i;
+    for (i = 0; i < 8; i++)
+    {
+        SPI_Set_CLK(0);
+        SPI_Set_DO(val & 0x80);
+        SPI_Set_CLK(1);
+        val <<= 1;
+    }
+    
+}
+
+unsigned char SPIRecvByte(void)
+{
+    int i;
+    unsigned char val = 0;
+    for (i = 0; i < 8; i++)
+    {
+        val <<= 1;
+        SPI_Set_CLK(0);    // 在下降沿读数据，具体看下面章节 read data
+        if (SPI_Get_DI())
+            val |= 1;
+        SPI_Set_CLK(1);
+    }
+    return val;    
+}
+
+static void SPIFlash_Set_CS(char val)
+{
+    if (val)
+        GPGDAT |= (1<<2);
+    else
+        GPGDAT &= ~(1<<2);
+}
+
+static void SPIFlashSendAddr(unsigned int addr)
+{
+    SPISendByte(addr >> 16);
+    SPISendByte(addr >> 8);
+    SPISendByte(addr & 0xff);
+}
+
+/*:
+ *
+ */
+void SPIFlashReadID(int *pMID, int *pDID)
+{
+    SPIFlash_Set_CS(0); /* 选中SPI FLASH */
+
+    SPISendByte(0x90);
+
+    SPIFlashSendAddr(0);
+
+    *pMID = SPIRecvByte();
+    *pDID = SPIRecvByte();
+
+    SPIFlash_Set_CS(1);
+}
+
+```
+
+## 读写数据
+### write enable
+根据手册，任何对flash进行修改的操作，都需要将状态寄存器的write enable latch位设置，方法是输入0x06指令
+![](./pic/16.jpg)
+
+### 32KB block erase
+* 确保WEL
+* CS:拉低
+* DI:0x52
+* DI:24bit address
+* CS:拉高
+* 之后若要读写数据，需要查看状态寄存器BUSY状态，等待擦除操作完成
+![](./pic/18.jpg)
+
+### read data
+* CS拉低
+* DI:发送指令0x03
+* DI:发送24bit地址，CLK上升沿获得数据
+* DO:接受数据，CLK下降沿获得数据，当发送完一字节，自动发送下一个字节数据
+* CS拉高，终止读数据通信
+![](./pic/17.jpg)
+
+# 使用SPI控制器
+使用控制器的好处：由控制器控制时序，控制发送接受的位操作
+写数据到 SPTDATn 寄存器，如果SPCONn的 ENSCK MSTR 被设置，则数据开始传输，
+下面是操作支持SPI的外围卡的编写流程:
+1. 设置波特率 预分频寄存器SPPREn
+2. 设置SPCONn配置合适模式
+3. 写0xFF到SPTDATn 10次，以初始化MMC或SD卡 -- 我们不关心此操作
+4. 设置GPIO引脚，将片选拉低 
+5. 若是写数据：检查状态状态寄存器的发送准备标志(REDY = 1)，写数据到SPTDATn
+6. 当使用normal mode，读数据：写0xFF到SPTDATn,然后确定REDY标志，然后从读缓存读数据
+8. 当使用Auto garbage data mode 读数据：确定REDY，然后从读缓存读数据
+10. 设置GPIO，取消片选
+
+## 初始化
+设置GPIO为SPI工作模式
+```C
+static void SPI_GPIO_Init(void)
+{
+    /* GPF1 OLED_CSn output */
+    GPFCON &= ~(3<<(1*2));
+    GPFCON |= (1<<(1*2));
+    GPFDAT |= (1<<1); // 初始禁止片选
+
+    /* GPG2 FLASH_CSn output
+    * GPG4 OLED_DC   output
+    * GPG5 SPIMISO   
+    * GPG6 SPIMOSI   
+    * GPG7 SPICLK    
+    */
+    GPGCON &= ~((3<<(2*2)) | (3<<(4*2)) | (3<<(5*2)) | (3<<(6*2)) | (3<<(7*2)));
+    GPGCON |= ((1<<(2*2)) | (1<<(4*2)) | (3<<(5*2)) | (3<<(6*2)) | (3<<(7*2)));
+    GPGDAT |= (1<<2); // 初始禁止片选
+}
+```
+
+## 初始化SPI控制器
+### 设置波特率
+首先获得从设备能支持的波特率
+OLED使用SPI4线模式，最小支持100ns -> 0.1MHz
+![](./pic/19.jpg)
+
+Flash使用3.3V供电，最大支持104MHz
+![](./pic/21.jpg)
+![](./pic/20.jpg)
+
+1s = 10^9 ns
+100ns = 1/(10^9) * 100 s
+1 MHz = 1/(10^6)
+
+芯片支持范围为 0.1MHz - 104MHz
+
+![](./pic/22.jpg)
+SPI控制器最少25MHz
+
+### 设置控制寄存器
+![](./pic/23.jpg)
+其中CPOL，CPHA，决定了极性，需要和芯片极性一致
+CPOL : 	0 CLK初始值为低电平, 1 CLK初始值为高电平
+CPHA :	0 CLK用第一个时钟沿采样数据，1 CLK用第二个时钟沿采样数据
+![](./pic/24.jpg)
+
+### 写数据
+判断REDY
+![](./pic/25.jpg)
+
+写数据
+![](./pic/26.jpg)
+```c
+SPISendByte(unsigned char c)
+{
+	while (!(SPSAT & 0x1)) // 等待直到REDY
+		;	
+	SPTDAT1 = val;
+}
+```
+
+### 读数据
+因为使用normal mode，所以先写数据0xFF到 SPTDAT1,
+在判断REDY，
+再从SPRDAT1读数据
+SPIRecvByte()
+{
+	SPTDAT1 = 0xff;
+	while (!(SPSAT & 0x1))
+		;
+	return SPRDAT1;
+}
+
+
