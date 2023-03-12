@@ -701,10 +701,66 @@ bootargs 的tag 为 ATAG_CMDLINE
 
 
 # 内核分区
+内核和uboot一样，nand本身没有分区表，靠程序内写死如何对Nand进行分区使用。
 
+每个SoC对应的硬件描述中有分区信息
+ arch/arm/mach-s3c24xx/common-smdk.c
+```c
+  static struct mtd_partition smdk_default_nand_part[] = {
+      [0] = {
+          .name   = "bootloader",
+          .size   = SZ_256K,
+          .offset = 0,
+      },
+      [1] = {
+          .name   = "params",
+          .offset = MTDPART_OFS_APPEND,
+          .size   = SZ_128K,
+      },
+      [2] = {
+          .name   = "kernel",
+          .offset = MTDPART_OFS_APPEND,
+          .size   = SZ_3M,
+      },
+      [3] = {
+          .name   = "rootfs",
+          .offset = MTDPART_OFS_APPEND,
+          .size   = MTDPART_SIZ_FULL,
+      }
+  };
+```
+当内核启动时会打印分区信息：
+```txt
 Creating 4 MTD partitions on "NAND":
 0x000000000000-0x000000040000 : "bootloader"
 0x000000040000-0x000000060000 : "params"
-0x000000060000-0x000000260000 : "kernel"
-0x000000260000-0x000010000000 : "rootfs"
+0x000000060000-0x000000360000 : "kernel"
+0x000000360000-0x000010000000 : "rootfs"
+```
+
+注意要和uboot的分区匹配
+```shell
+#mtd
+#: name                        size            offset          mask_flags
+0: bootloader          0x00040000      0x00000000      0
+1: params              0x00020000      0x00040000      0
+2: kernel              0x00300000      0x00060000      0
+3: root                0x0fca0000      0x00360000      0
+```
+
+## 通过uboot传递mtdparts
+kernel解析cmdline时，定义了mtdparts的解析
+```c
+  static int mtdpart_setup(char *s)
+  {
+      cmdline = s;
+      return 1;
+  }
+
+  __setup("mtdparts=", mtdpart_setup);
+```
+所以可以通过uboot bootargs环境变量传递 mtdparts
+```shell
+setenv bootargs=root=/dev/mtdblock3 rootfstype=jffs2 mtdparts=nor_flash:512k(u-boot),256k(env),4m(kernel),-(rootfs)
+```
 
