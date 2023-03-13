@@ -447,6 +447,7 @@ SPISendByte(unsigned char c)
 因为使用normal mode，所以先写数据0xFF到 SPTDAT1,
 在判断REDY，
 再从SPRDAT1读数据
+```c
 SPIRecvByte()
 {
 	SPTDAT1 = 0xff;
@@ -454,5 +455,5 @@ SPIRecvByte()
 		;
 	return SPRDAT1;
 }
-
+```
 
